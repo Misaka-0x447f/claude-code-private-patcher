@@ -91,18 +91,29 @@ function findLatestUserUuid(messages) {
   return null;
 }
 
-function findFirstAssistantTextAfter(messages, afterUserUuid) {
-  const idx = messages.findIndex(m => m?.uuid === afterUserUuid);
+function pickAnchor(messages, latestUserUuid, lastBlockedAssistantUuid) {
+  if (!lastBlockedAssistantUuid) return latestUserUuid;
+  const userIdx = messages.findIndex(m => m?.uuid === latestUserUuid);
+  const blockedIdx = messages.findIndex(m => m?.uuid === lastBlockedAssistantUuid);
+  if (blockedIdx < 0) return latestUserUuid;
+  if (blockedIdx <= userIdx) return latestUserUuid;
+  return lastBlockedAssistantUuid;
+}
+
+function findFirstAssistantTextAfter(messages, anchorUuid) {
+  const idx = messages.findIndex(m => m?.uuid === anchorUuid);
   if (idx < 0) return null;
   for (let i = idx + 1; i < messages.length; i++) {
     const m = messages[i];
     if (getRole(m) !== 'assistant') continue;
     const content = getContent(m);
-    if (typeof content === 'string' && content.trim()) return content;
+    if (typeof content === 'string' && content.trim()) {
+      return { text: content, assistantUuid: m?.uuid ?? null };
+    }
     if (!Array.isArray(content)) continue;
     for (const block of content) {
       if (block?.type === 'text' && typeof block?.text === 'string' && block.text.trim()) {
-        return block.text;
+        return { text: block.text, assistantUuid: m?.uuid ?? null };
       }
     }
   }
@@ -123,28 +134,37 @@ async function readState(sessionId) {
   try {
     raw = await fs.readFile(p, 'utf8');
   } catch (err) {
-    if (err.code === 'ENOENT') return { lastPassedUserUuid: null };
+    if (err.code === 'ENOENT') {
+      return { lastPassedUserUuid: null, lastBlockedAssistantUuid: null };
+    }
     throw new Error(`读取状态文件失败 (${p}): ${err.message}`);
   }
   try {
     const obj = JSON.parse(raw);
-    return { lastPassedUserUuid: obj?.lastPassedUserUuid ?? null };
+    return {
+      lastPassedUserUuid: obj?.lastPassedUserUuid ?? null,
+      lastBlockedAssistantUuid: obj?.lastBlockedAssistantUuid ?? null,
+    };
   } catch {
     process.stderr.write(
-      `[claude-md-guard] 警告: 状态文件 ${p} 内容损坏,已按空状态处理并将在通过后覆盖。\n`
+      `[claude-md-guard] 警告: 状态文件 ${p} 内容损坏,已按空状态处理并将在下次写入时覆盖。\n`
     );
-    return { lastPassedUserUuid: null };
+    return { lastPassedUserUuid: null, lastBlockedAssistantUuid: null };
   }
 }
 
 async function writeState(sessionId, state) {
   const p = stateFilePath(sessionId);
+  const payload = {
+    lastPassedUserUuid: state.lastPassedUserUuid ?? null,
+    lastBlockedAssistantUuid: state.lastBlockedAssistantUuid ?? null,
+  };
   try {
     await fs.mkdir(STATE_DIR, { recursive: true });
-    await fs.writeFile(p, JSON.stringify(state), 'utf8');
+    await fs.writeFile(p, JSON.stringify(payload), 'utf8');
   } catch (err) {
     process.stderr.write(
-      `[claude-md-guard] 警告: 状态文件写入失败 (${p}): ${err.message}。本轮已通过,但下一次工具调用可能被重复检查。\n`
+      `[claude-md-guard] 警告: 状态文件写入失败 (${p}): ${err.message}。若本次为 block,下次仍会从旧锚点起点重复检查同一段发言。\n`
     );
   }
 }
@@ -306,27 +326,48 @@ async function main() {
     return;
   }
 
-  const assistantText = findFirstAssistantTextAfter(messages, latestUserUuid);
-  if (!assistantText) {
+  const anchorUuid = pickAnchor(messages, latestUserUuid, state.lastBlockedAssistantUuid);
+  const found = findFirstAssistantTextAfter(messages, anchorUuid);
+  if (!found) {
     emitAllow();
     return;
   }
 
   const apiKey = await readApiKey();
-  const verdict = await callJudge(assistantText, apiKey);
+  const verdict = await callJudge(found.text, apiKey);
   if (verdict.compliant) {
-    await writeState(sessionId, { lastPassedUserUuid: latestUserUuid });
+    await writeState(sessionId, {
+      lastPassedUserUuid: latestUserUuid,
+      lastBlockedAssistantUuid: null,
+    });
     emitAllow();
     return;
   }
 
-  emitBlock(
-    `本轮回复的开头未清晰声明模型身份。要求:在回应用户的第一句话开头,写出当前正在使用的具体模型名称(例如 "Claude Opus 4.7 " 之类)。判断模型给出的理由: ${
-      verdict.reason || '(未提供)'
-    }`
-  );
+  await writeState(sessionId, {
+    lastPassedUserUuid: state.lastPassedUserUuid,
+    lastBlockedAssistantUuid: found.assistantUuid,
+  });
+  if (verdict.reason) {
+    process.stderr.write(`[claude-md-guard] 判断模型给出的理由: ${verdict.reason}\n`);
+  }
+  emitBlock('检测到违反用户级 CLAUDE.md 要求,请重读。');
 }
 
-main().catch(err => {
-  emitBlock(`Hook 执行异常: ${err?.message ?? String(err)}`);
-});
+if (require.main === module) {
+  main().catch(err => {
+    emitBlock(`Hook 执行异常: ${err?.message ?? String(err)}`);
+  });
+} else {
+  module.exports = {
+    isRealUserMessage,
+    findLatestUserUuid,
+    pickAnchor,
+    findFirstAssistantTextAfter,
+    loadTranscriptTail,
+    sanitizeSessionId,
+    readState,
+    writeState,
+    stateFilePath,
+  };
+}

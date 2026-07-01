@@ -51,20 +51,30 @@ chmod 600 ~/.claude/claude-md-guard-chatkey
 
 1. 从 stdin 读取 hook JSON,取 `session_id` 与 `transcript_path`。
 2. 读 transcript JSONL 尾部,从末尾往前找到第 3 条"真实用户发言"(即 `role: user` 且内容为纯文本或含 `type: text` 块)作为解析起点,避免长会话每次全量扫描;逐行 `JSON.parse`,单行解析失败会跳过而不整体崩溃。
-3. 在剩余消息里找出**最新一条真实用户发言**的 `uuid` —— 这就是"本轮"的边界。
-4. 从 `os.tmpdir()/claude-hook-state/<sanitized-session-id>.json` 读取上次通过检查的用户消息 uuid:
-   - 若与当前 `uuid` 相同 → 本轮已判过、且合规,直接放行,不调用任何 API。
-   - 否则视为新一轮,进入下一步。
-5. 从该用户消息之后开始遍历,找到**第一个** `role: assistant` 消息中的**第一个** `type: text` 内容块 —— 这就是"本轮的开头发言"。工具调用(`tool_use`)和工具结果回传(`tool_result`,虽然在协议上是 `role: user`)都被显式忽略。
-6. 如果本轮暂时找不到任何 assistant 文本(比如助手直接连着调工具,还没夹带过文字) → 放行,不更新状态、不调 API,等下一次 hook 再看。
-7. 如果找到了发言文本 → 读 `~/.claude/claude-md-guard-chatkey`,调用 OpenRouter,把这段发言原文交给 `deepseek/deepseek-v4-flash`,让它语义判断"开头第一句话是否清楚提到了具体的模型名称"。脚本自身不做任何正则或字符串匹配。
-8. 判断结果:
-   - `compliant: true` → 把当前 uuid 写入状态文件后放行。
-   - `compliant: false` → 通过 `hookSpecificOutput.permissionDecision = "deny"` 阻断本次工具调用,并把判断模型给出的理由回传给 Claude Code。
+3. 在剩余消息里找出**最新一条真实用户发言**的 `uuid` —— 记作 `latestUserUuid`。
+4. 从 `os.tmpdir()/claude-hook-state/<sanitized-session-id>.json` 读取两个字段:
+   - `lastPassedUserUuid` —— 上次通过检查时的用户消息 uuid。
+   - `lastBlockedAssistantUuid` —— 上次 block 时那段不合规发言所在的 assistant 消息 uuid。
+5. 若 `state.lastPassedUserUuid === latestUserUuid` → 本轮已通过,直接放行,不调用 API。
+6. 决定"从哪里开始查找 assistant 发言文本"的锚点:
+   - 如果 `state.lastBlockedAssistantUuid` 存在、在当前消息列表里找得到、且位置在 `latestUserUuid` **之后** → 用它作为锚点(表示"上次已经判过这个 assistant 消息,应该看它之后的新回复")。
+   - 否则用 `latestUserUuid` 作为锚点(新一轮,或者被 block 后用户又发了新消息)。
+7. 从锚点之后开始遍历,找到**下一个** `role: assistant` 消息中的**第一个** `type: text` 内容块。工具调用(`tool_use`)和工具结果回传(`tool_result`,虽然在协议上是 `role: user`)都被显式忽略。
+8. 如果找不到任何 assistant 文本(助手直接连着调工具、还没生成新的文字) → 放行,不更新状态、不调 API,等下一次 hook 再看。
+9. 找到发言文本 → 读 `~/.claude/claude-md-guard-chatkey`,调用 OpenRouter,把发言原文交给 `deepseek/deepseek-v4-flash`,让它语义判断"开头第一句话是否清楚提到了具体的模型名称"。脚本自身不做任何正则或字符串匹配。
+10. 判断结果:
+    - `compliant: true` → 写入 `{lastPassedUserUuid: latestUserUuid, lastBlockedAssistantUuid: null}` 后放行。
+    - `compliant: false` → 写入 `{lastPassedUserUuid: 保持原值, lastBlockedAssistantUuid: 当前发言所在的 assistant 消息 uuid}`,通过 `hookSpecificOutput.permissionDecision = "deny"` 阻断本次工具调用。`permissionDecisionReason` 统一固定为 `"检测到违反用户级 CLAUDE.md 要求,请重读。"`,判断模型给出的具体理由会写到 stderr 供调试查看,不进入对话上下文。
+
+### 为什么需要两个锚点
+
+只用 `latestUserUuid` 会陷入死循环:助手被 block 之后,用户没说话就让助手自己修正,此时 `latestUserUuid` 没变,脚本每次都会从**同一个用户消息之后**找**同一段**已经被判过不合规的 assistant text 送去判断,永远得到 `false`,永远 block。
+
+引入 `lastBlockedAssistantUuid` 之后,被 block 的 assistant 消息 uuid 会被记下来。下一次触发时,锚点前进到那个消息之后,才能看到助手修正后的**新** assistant 消息,判断也才能得到"合规"的结果并放行。
 
 ## 错误处理
 
-严格遵循"不接受静默错误"。所有会导致无法完成合规判断的情况都会 **block** 当前工具调用并把明确原因写进 `permissionDecisionReason`,例如:
+严格遵循"不接受静默错误"。所有会导致无法完成合规判断的**配置或程序错误**都会 **block** 当前工具调用,并把详细原因原文写进 `permissionDecisionReason`(与内容不合规的固定文案区分开,方便你一眼看出到底是"我说错了"还是"hook 本身崩了"):
 
 - 密钥文件不存在或为空
 - 密钥文件 IO 错误
