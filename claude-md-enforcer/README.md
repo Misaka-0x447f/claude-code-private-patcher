@@ -1,4 +1,4 @@
-# claude-code-claude-md-enforcer
+# claude-code-private-patcher
 
 一个 Claude Code 的 `PreToolUse` 钩子脚本,用一个低成本模型(经 OpenRouter 调用 `deepseek/deepseek-v4-flash`)判断当前会话中助手对用户的回复,其开头第一句话是否清楚地声明了自己的具体模型名称。不合规就阻断当前的工具调用。
 
@@ -34,7 +34,7 @@ chmod 600 ~/.claude/claude-md-guard-chatkey
         "hooks": [
           {
             "type": "command",
-            "command": "node /home/misaka/git/claude-code-claude-md-enforcer/main.js"
+            "command": "node /home/misaka/git/claude-code-private-patcher/claude-md-enforcer/main.js"
           }
         ]
       }
