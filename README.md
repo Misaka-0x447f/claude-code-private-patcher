@@ -50,7 +50,7 @@ chmod 600 ~/.claude/claude-md-guard-chatkey
 一次 PreToolUse 触发时,脚本按如下顺序处理:
 
 1. 从 stdin 读取 hook JSON,取 `session_id` 与 `transcript_path`。
-2. 读 transcript JSONL 尾部,从末尾往前找到第 3 条"真实用户发言"(即 `role: user` 且内容为纯文本或含 `type: text` 块)作为解析起点,避免长会话每次全量扫描;逐行 `JSON.parse`,单行解析失败会跳过而不整体崩溃。
+2. 读 transcript JSONL 尾部,从末尾往前找到第 3 条"真实用户发言"作为解析起点,避免长会话每次全量扫描;逐行 `JSON.parse`,单行解析失败会跳过而不整体崩溃。"真实用户发言"= `role: user` 且内容为纯文本或含 `type: text` 块,**并且**不是 harness 注入的伪用户消息 —— `isMeta: true`、`[Request interrupted...]` 打断标记、`<system-reminder>` / `<task-notification>` / `<local-command-stdout>` / `<local-command-caveat>` / `<command-name>` / local-command Caveat 开头的文本都会被过滤(这些消息在协议上是 user 角色,但不是人说的话;若不过滤,它们会推进 `latestUserUuid`,让已通过的轮次被重新审查,审到的往往是任务中途无前缀义务的 assistant 文本,造成误 block)。
 3. 在剩余消息里找出**最新一条真实用户发言**的 `uuid` —— 记作 `latestUserUuid`。
 4. 从 `os.tmpdir()/claude-hook-state/<sanitized-session-id>.json` 读取两个字段:
    - `lastPassedUserUuid` —— 上次通过检查时的用户消息 uuid。
@@ -61,7 +61,7 @@ chmod 600 ~/.claude/claude-md-guard-chatkey
    - 否则用 `latestUserUuid` 作为锚点(新一轮,或者被 block 后用户又发了新消息)。
 7. 从锚点之后开始遍历,找到**下一个** `role: assistant` 消息中的**第一个** `type: text` 内容块。工具调用(`tool_use`)和工具结果回传(`tool_result`,虽然在协议上是 `role: user`)都被显式忽略。
 8. 如果找不到任何 assistant 文本(助手直接连着调工具、还没生成新的文字) → 放行,不更新状态、不调 API,等下一次 hook 再看。
-9. 找到发言文本 → 读 `~/.claude/claude-md-guard-chatkey`,调用 OpenRouter,把发言原文交给 `deepseek/deepseek-v4-flash`,让它语义判断"开头第一句话是否清楚提到了具体的模型名称"。脚本自身不做任何正则或字符串匹配。
+9. 找到发言文本 → 读 `~/.claude/claude-md-guard-chatkey`,调用 OpenRouter,把发言原文交给 `deepseek/deepseek-v4-flash`,让它语义判断"开头第一句话是否清楚提到了具体的模型名称"。脚本自身不做任何正则或字符串匹配。judge 的 system prompt 里显式注入了 Claude 全系列及常见友商模型名(Claude、Fable、Mythos、Opus、Sonnet、Haiku、GPT、DeepSeek、Gemini、Grok、Qwen 及版本号/组合形式),并要求"没见过的名字也按有效处理"——否则 judge 模型的训练数据晚于新模型发布时,会把 "Fable 5" 这类新名字判成"不是模型名"造成整轮误 block(2026-07-02 实际踩坑)。
 10. 判断结果:
     - `compliant: true` → 写入 `{lastPassedUserUuid: latestUserUuid, lastBlockedAssistantUuid: null}` 后放行。
     - `compliant: false` → 写入 `{lastPassedUserUuid: 保持原值, lastBlockedAssistantUuid: 当前发言所在的 assistant 消息 uuid}`,通过 `hookSpecificOutput.permissionDecision = "deny"` 阻断本次工具调用。`permissionDecisionReason` 统一固定为 `"检测到违反用户级 CLAUDE.md 要求,请重读。"`,判断模型给出的具体理由会写到 stderr 供调试查看,不进入对话上下文。
