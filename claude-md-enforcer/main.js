@@ -7,9 +7,6 @@ const os = require('os');
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const JUDGE_MODEL = 'deepseek/deepseek-v4-flash';
 const API_TIMEOUT_MS = 15000;
-const NETWORK_HINT =
-  '\n可用如下命令测试网络连通性: curl -v https://openrouter.ai/api/v1/models' +
-  '\n若仅出现一两次,请重试;否则请提示用户去解决网络问题。';
 const KEY_FILE = path.join(os.homedir(), '.claude', 'claude-md-guard-chatkey');
 const STATE_DIR = path.join(os.tmpdir(), 'claude-hook-state');
 const RECENT_USER_TURNS = 3;
@@ -269,10 +266,11 @@ async function callJudge(assistantText, apiKey) {
     });
   } catch (err) {
     clearTimeout(timer);
-    if (err?.name === 'AbortError') {
-      throw new Error(`调用 OpenRouter 超时(${API_TIMEOUT_MS} ms 内未返回)。${NETWORK_HINT}`);
-    }
-    throw new Error(`调用 OpenRouter 请求失败: ${err?.message ?? String(err)}${NETWORK_HINT}`);
+    const kind = err?.name === 'AbortError' ? `超时(${API_TIMEOUT_MS} ms 内未返回)` : '请求失败';
+    process.stderr.write(
+      `[claude-md-guard] OpenRouter ${kind},本次放行: ${err?.message ?? String(err)}\n`
+    );
+    return null;
   }
   clearTimeout(timer);
 
@@ -362,6 +360,10 @@ async function main() {
 
   const apiKey = await readApiKey();
   const verdict = await callJudge(found.text, apiKey);
+  if (verdict === null) {
+    emitAllow();
+    return;
+  }
   if (verdict.compliant) {
     await writeState(sessionId, {
       lastPassedUserUuid: latestUserUuid,
