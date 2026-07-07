@@ -115,15 +115,6 @@ function findLatestUserUuid(messages) {
   return null;
 }
 
-function pickAnchor(messages, latestUserUuid, lastBlockedAssistantUuid) {
-  if (!lastBlockedAssistantUuid) return latestUserUuid;
-  const userIdx = messages.findIndex(m => m?.uuid === latestUserUuid);
-  const blockedIdx = messages.findIndex(m => m?.uuid === lastBlockedAssistantUuid);
-  if (blockedIdx < 0) return latestUserUuid;
-  if (blockedIdx <= userIdx) return latestUserUuid;
-  return lastBlockedAssistantUuid;
-}
-
 function findFirstAssistantTextAfter(messages, anchorUuid) {
   const idx = messages.findIndex(m => m?.uuid === anchorUuid);
   if (idx < 0) return null;
@@ -159,36 +150,36 @@ async function readState(sessionId) {
     raw = await fs.readFile(p, 'utf8');
   } catch (err) {
     if (err.code === 'ENOENT') {
-      return { lastPassedUserUuid: null, lastBlockedAssistantUuid: null };
+      return { lastHandledUserUuid: null };
     }
     throw new Error(`读取状态文件失败 (${p}): ${err.message}`);
   }
   try {
     const obj = JSON.parse(raw);
+    // 兼容旧字段名 lastPassedUserUuid:旧语义下"已通过"与新语义下"已处理"等价
+    // (旧版一旦推进 lastPassedUserUuid 就永久放行本轮),读入后统一按新字段使用。
     return {
-      lastPassedUserUuid: obj?.lastPassedUserUuid ?? null,
-      lastBlockedAssistantUuid: obj?.lastBlockedAssistantUuid ?? null,
+      lastHandledUserUuid: obj?.lastHandledUserUuid ?? obj?.lastPassedUserUuid ?? null,
     };
   } catch {
     process.stderr.write(
       `[claude-md-guard] 警告: 状态文件 ${p} 内容损坏,已按空状态处理并将在下次写入时覆盖。\n`
     );
-    return { lastPassedUserUuid: null, lastBlockedAssistantUuid: null };
+    return { lastHandledUserUuid: null };
   }
 }
 
 async function writeState(sessionId, state) {
   const p = stateFilePath(sessionId);
   const payload = {
-    lastPassedUserUuid: state.lastPassedUserUuid ?? null,
-    lastBlockedAssistantUuid: state.lastBlockedAssistantUuid ?? null,
+    lastHandledUserUuid: state.lastHandledUserUuid ?? null,
   };
   try {
     await fs.mkdir(STATE_DIR, { recursive: true });
     await fs.writeFile(p, JSON.stringify(payload), 'utf8');
   } catch (err) {
     process.stderr.write(
-      `[claude-md-guard] 警告: 状态文件写入失败 (${p}): ${err.message}。若本次为 block,下次仍会从旧锚点起点重复检查同一段发言。\n`
+      `[claude-md-guard] 警告: 状态文件写入失败 (${p}): ${err.message}。下次进入本轮仍会重复检查同一段发言。\n`
     );
   }
 }
@@ -345,14 +336,17 @@ async function main() {
     return;
   }
 
+  // 新语义:本轮用户发言之后,允许至多一次 hook 判定(无论 allow / block),
+  // 之后同一 latestUserUuid 下的所有 PreToolUse 都直接放行,直到下一次真实用户
+  // 发言把 latestUserUuid 推进为止。callJudge 返回 null(网络失败)不算判定,
+  // 不推进 lastHandledUserUuid,下一次仍可尝试。
   const state = await readState(sessionId);
-  if (state.lastPassedUserUuid === latestUserUuid) {
+  if (state.lastHandledUserUuid === latestUserUuid) {
     emitAllow();
     return;
   }
 
-  const anchorUuid = pickAnchor(messages, latestUserUuid, state.lastBlockedAssistantUuid);
-  const found = findFirstAssistantTextAfter(messages, anchorUuid);
+  const found = findFirstAssistantTextAfter(messages, latestUserUuid);
   if (!found) {
     emitAllow();
     return;
@@ -364,19 +358,13 @@ async function main() {
     emitAllow();
     return;
   }
+
+  await writeState(sessionId, { lastHandledUserUuid: latestUserUuid });
+
   if (verdict.compliant) {
-    await writeState(sessionId, {
-      lastPassedUserUuid: latestUserUuid,
-      lastBlockedAssistantUuid: null,
-    });
     emitAllow();
     return;
   }
-
-  await writeState(sessionId, {
-    lastPassedUserUuid: state.lastPassedUserUuid,
-    lastBlockedAssistantUuid: found.assistantUuid,
-  });
   if (verdict.reason) {
     process.stderr.write(`[claude-md-guard] 判断模型给出的理由: ${verdict.reason}\n`);
   }
@@ -391,7 +379,6 @@ if (require.main === module) {
   module.exports = {
     isRealUserMessage,
     findLatestUserUuid,
-    pickAnchor,
     findFirstAssistantTextAfter,
     loadTranscriptTail,
     sanitizeSessionId,
