@@ -380,7 +380,7 @@ async function main() {
   if (verdict.reason) {
     process.stderr.write(`[claude-md-guard] 判断模型给出的理由: ${verdict.reason}\n`);
   }
-  emitBlock('检测到违反用户级 CLAUDE.md 要求,请重读。');
+  emitBlock('检测到违反用户级 CLAUDE.md 要求。请阅读并复述一遍该文件，并确保复述的过程中也遵守要求，再继续。');
 }
 
 if (require.main === module) {
