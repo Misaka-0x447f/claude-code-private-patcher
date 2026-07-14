@@ -64,7 +64,7 @@ chmod 600 ~/.claude/claude-md-guard-chatkey
 9. 找到发言文本 → 读 `~/.claude/claude-md-guard-chatkey`,调用 OpenRouter,把发言原文交给 `deepseek/deepseek-v4-flash`,让它语义判断"开头第一句话是否清楚提到了具体的模型名称"。脚本自身不做任何正则或字符串匹配。judge 的 system prompt 里显式注入了 Claude 全系列及常见友商模型名(Claude、Fable、Mythos、Opus、Sonnet、Haiku、GPT、DeepSeek、Gemini、Grok、Qwen 及版本号/组合形式),并要求"没见过的名字也按有效处理"——否则 judge 模型的训练数据晚于新模型发布时,会把 "Fable 5" 这类新名字判成"不是模型名"造成整轮误 block(2026-07-02 实际踩坑)。
 10. 判断结果:
     - `compliant: true` → 写入 `{lastPassedUserUuid: latestUserUuid, lastBlockedAssistantUuid: null}` 后放行。
-    - `compliant: false` → 写入 `{lastPassedUserUuid: 保持原值, lastBlockedAssistantUuid: 当前发言所在的 assistant 消息 uuid}`,通过 `hookSpecificOutput.permissionDecision = "deny"` 阻断本次工具调用。`permissionDecisionReason` 统一固定为 `"检测到违反用户级 CLAUDE.md 要求。请阅读并复述一遍该文件，并确保复述的过程中也遵守要求，再继续。"`,判断模型给出的具体理由会写到 stderr 供调试查看,不进入对话上下文。
+    - `compliant: false` → 写入 `{lastPassedUserUuid: 保持原值, lastBlockedAssistantUuid: 当前发言所在的 assistant 消息 uuid}`,通过 `hookSpecificOutput.permissionDecision = "deny"` 阻断本次工具调用。`permissionDecisionReason` 统一固定为 `'你忘了在回答开头写模型名。这是 ~/.claude/CLAUDE.md 里的一条规则（"每次用户发送消息后，你的第一句话的开头，使用你的模型名称来表明身份"）。请重新回答本轮，并在开头写清模型名。'`,判断模型给出的具体理由会写到 stderr 供调试查看,不进入对话上下文。措辞刻意用"用户口吻的直接纠正"而非"检测到违反……"式执法语气,并去掉了"复述整个 CLAUDE.md 文件"这类无关动作 —— 后者形状太像提示注入,会触发被 block 的模型自身对该消息的怀疑。
 
 ### 为什么需要两个锚点
 

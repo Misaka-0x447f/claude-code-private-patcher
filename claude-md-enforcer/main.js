@@ -368,7 +368,7 @@ async function main() {
   if (verdict.reason) {
     process.stderr.write(`[claude-md-guard] 判断模型给出的理由: ${verdict.reason}\n`);
   }
-  emitBlock('检测到违反用户级 CLAUDE.md 要求。请阅读并复述一遍该文件，并确保复述的过程中也遵守要求，再继续。');
+  emitBlock('你忘了在回答开头写模型名。这是 ~/.claude/CLAUDE.md 里的一条规则（"每次用户发送消息后，你的第一句话的开头，使用你的模型名称来表明身份"）。请重新回答本轮，并在开头写清模型名。');
 }
 
 if (require.main === module) {
