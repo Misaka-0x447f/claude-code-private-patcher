@@ -8,6 +8,7 @@ const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const JUDGE_MODEL = 'deepseek/deepseek-v4-flash';
 const API_TIMEOUT_MS = 15000;
 const KEY_FILE = path.join(os.homedir(), '.claude', 'claude-md-guard-chatkey');
+const CLAUDE_MD_FILE = path.join(os.homedir(), '.claude', 'CLAUDE.md');
 const STATE_DIR = path.join(os.tmpdir(), 'claude-hook-state');
 const RECENT_USER_TURNS = 3;
 
@@ -368,7 +369,19 @@ async function main() {
   if (verdict.reason) {
     process.stderr.write(`[claude-md-guard] 判断模型给出的理由: ${verdict.reason}\n`);
   }
-  emitBlock('你忘了在回答开头写模型名。这是 ~/.claude/CLAUDE.md 里的一条规则（"每次用户发送消息后，你的第一句话的开头，使用你的模型名称来表明身份"），存在的原因是防止你中途忘记 CLAUDE.md。请重新回答本轮，并在开头写清模型名。');
+
+  let claudeMdContent;
+  try {
+    claudeMdContent = await fs.readFile(CLAUDE_MD_FILE, 'utf8');
+  } catch (err) {
+    emitBlock(
+      `你忘了在回答开头写模型名，这违反了 ~/.claude/CLAUDE.md 里的一条规则。原本要在此处复述 CLAUDE.md 全文给你，但读取失败(${CLAUDE_MD_FILE}): ${err?.message ?? String(err)}。请重新回答本轮，并在开头写清模型名。`
+    );
+    return;
+  }
+  emitBlock(
+    `你似乎不记得用户级 CLAUDE.md 的内容了，因此我打断这次工具调用并复述内容给你：\n${claudeMdContent}`
+  );
 }
 
 if (require.main === module) {
